@@ -1390,11 +1390,19 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 agent._sanitize_tool_calls_for_strict_api(api_msg, model=agent.model)
             api_messages.append(api_msg)
 
+        # System message: byte-stable, no ephemeral data injected.
         effective_system = agent._cached_system_prompt or ""
-        if agent.ephemeral_system_prompt:
-            effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+        # Turn Composer tail injection for ephemeral data
+        _tc = getattr(agent, "_turn_composer", None)
+        if _tc is not None and _tc.has_pending():
+            from agent.turn_composer import apply_tail_messages
+            tail = _tc.build_tail_messages(existing_messages=api_messages)
+            api_messages = apply_tail_messages(api_messages, tail)
+            _tc.drain()
+
         if agent.prefill_messages:
             sys_offset = 1 if effective_system else 0
             for idx, pfm in enumerate(agent.prefill_messages):

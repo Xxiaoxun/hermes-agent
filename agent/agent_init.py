@@ -298,6 +298,84 @@ def init_agent(
     agent.quiet_mode = quiet_mode
     agent.tool_progress_mode = tool_progress_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
+
+    # ── Turn Composer (cache-first architecture) ────────────────
+    # Accumulates per-turn ephemeral data (ephemeral system prompt,
+    # memory updates, background notifications) and injects them into
+    # the conversation tail rather than mutating the system prompt.
+    # This keeps the system prefix byte-stable for maximum cache hits.
+    from agent.turn_composer import TurnComposer
+    agent._turn_composer = TurnComposer()
+    # If an ephemeral_system_prompt was provided at construction, queue
+    # it in the composer so it's injected as a tail message (not into
+    # the system message).
+    if ephemeral_system_prompt:
+        agent._turn_composer.set_ephemeral_system(ephemeral_system_prompt)
+
+    # ── Cache strategy config ───────────────────────────────────
+    # Read from prompt_caching section in config.yaml alongside the
+    # existing cache_ttl setting.  Defaults preserve backward compat.
+    agent._cache_strategy = "system_and_3"
+    agent._cache_system_ttl = "1h"
+    agent._cache_conversation_ttl = "5m"
+    try:
+        from hermes_cli.config import load_config as _load_cache_cfg
+        _pc = _load_cache_cfg().get("prompt_caching", {}) or {}
+        agent._cache_strategy = _pc.get("strategy", "system_and_3")
+        agent._cache_system_ttl = _pc.get("system_ttl", "1h")
+        agent._cache_conversation_ttl = _pc.get("conversation_ttl", "5m")
+    except Exception:
+        pass
+
+    # ── Cold-start prune (cache-first architecture) ──────────────
+    # When resuming a session idle past the cache TTL, prune stale
+    # tool results to shrink the expensive first request.
+    # Design reference: DeepSeek-Reasonix controller.go maybeColdResumePrune()
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+
+    def _cold_start_prune(messages, threshold_seconds=300):
+        """Prune stale tool results if the session has been idle past threshold."""
+        if not messages:
+            return
+        # Find the last message timestamp (if available)
+        last_ts = None
+        for msg in reversed(messages):
+            ts = msg.get("_timestamp") or msg.get("timestamp")
+            if ts:
+                if isinstance(ts, (int, float)):
+                    last_ts = ts
+                elif isinstance(ts, str):
+                    try:
+                        last_ts = _dt.fromisoformat(ts).timestamp()
+                    except Exception:
+                        pass
+                break
+        if last_ts is None:
+            return  # No timestamp — can't determine staleness
+        idle_seconds = _time.time() - last_ts
+        if idle_seconds < threshold_seconds:
+            return  # Cache may still be warm
+
+        pruned = 0
+        for i, msg in enumerate(messages):
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > 1024 and not content.startswith("[elided"):
+                msg["content"] = (
+                    f"[elided tool result — {len(content)} chars, "
+                    f"re-run the tool if the data is needed again]"
+                )
+                pruned += 1
+        if pruned:
+            logger.info(
+                "Cold-start prune: elided %d stale tool results "
+                "(session idle %.0f min, cache expired)",
+                pruned, idle_seconds / 60,
+            )
+
+    agent._cold_start_prune = _cold_start_prune
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
     agent._user_id_alt = user_id_alt  # Optional stable alternate platform identifier

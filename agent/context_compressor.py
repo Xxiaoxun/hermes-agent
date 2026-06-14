@@ -1894,6 +1894,19 @@ This compaction should PRIORITISE preserving all information related to the focu
         return bool(message.get(COMPRESSED_SUMMARY_METADATA_KEY))
 
     @classmethod
+    def _is_compaction_summary(cls, message: Dict[str, Any]) -> bool:
+        """Return True if *message* is a prior compaction summary.
+
+        Checks both the metadata flag and content-prefix heuristics.
+        Used by the structure-preserving partition to ensure prior
+        summaries are never re-summarized (prevents summary drift).
+        """
+        if cls._has_compressed_summary_metadata(message):
+            return True
+        content = message.get("content")
+        return cls._is_context_summary_content(content)
+
+    @classmethod
     def _derive_auto_focus_topic(
         cls,
         messages: List[Dict[str, Any]],
@@ -2454,6 +2467,66 @@ This compaction should PRIORITISE preserving all information related to the focu
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
+
+        # ── Economic gate (DeepSeek-Reasonix compact.go:140-143) ──
+        # If the foldable region is too small, skip compression — the
+        # LLM summarizer API call costs more than the tokens saved.
+        # NOTE: We do NOT increment _ineffective_compression_count here.
+        # That counter is for anti-thrashing (compression ran but didn't
+        # help).  The economic gate is a deliberate skip — the region
+        # may grow in future turns when compression becomes worthwhile.
+        _ECONOMIC_GATE_MIN_TOKENS = 400
+        fold_tokens = estimate_messages_tokens_rough(turns_to_summarize)
+        if fold_tokens < _ECONOMIC_GATE_MIN_TOKENS:
+            self._last_compression_savings_pct = 0.0
+            if not self.quiet_mode:
+                logger.info(
+                    "Compression skipped: foldable region only %d tokens "
+                    "(<%d economic gate) — not worth an API call.",
+                    fold_tokens, _ECONOMIC_GATE_MIN_TOKENS,
+                )
+            return messages
+
+        # ── Structure-preserving partition ────────────────────────
+        # Split the foldable region into VERBATIM (small user turns +
+        # prior compaction summaries) and FOLD (large assistant/tool
+        # output).  Only FOLD gets sent to the LLM summarizer.
+        # Design reference: DeepSeek-Reasonix compact.go partitionFold()
+        _USER_TURN_KEEP_THRESHOLD = 500  # tokens
+        verbatim_turns = []
+        fold_turns = []
+        for msg in turns_to_summarize:
+            is_prior_summary = self._is_compaction_summary(msg)
+            is_small_user = (
+                msg.get("role") == "user"
+                and estimate_messages_tokens_rough([msg]) < _USER_TURN_KEEP_THRESHOLD
+            )
+            if is_prior_summary or is_small_user:
+                verbatim_turns.append(msg)
+            else:
+                fold_turns.append(msg)
+
+        # If after partitioning only verbatim turns remain, nothing to
+        # summarize — insert them directly.
+        if not fold_turns:
+            if not self.quiet_mode:
+                logger.info(
+                    "Compression: all %d turns are verbatim (small user turns "
+                    "or prior summaries) — inserting directly, no LLM call.",
+                    len(verbatim_turns),
+                )
+            # Assemble: head + verbatim turns + tail (skip LLM summarizer)
+            compressed = []
+            for i in range(compress_start):
+                compressed.append(messages[i].copy())
+            compressed.extend(verbatim_turns)
+            for i in range(compress_end, n_messages):
+                compressed.append(messages[i].copy())
+            self.compression_count += 1
+            return compressed
+
+        # Use only the foldable turns for the LLM summarizer
+        turns_to_summarize = fold_turns
         # A persisted handoff summary can sit in the protected head after a
         # resume (commonly immediately after the system prompt). Search from
         # the first non-system message through the compression window so we can
@@ -2626,11 +2699,37 @@ This compaction should PRIORITISE preserving all information related to the focu
             summary = summary + "\n\n" + _SUMMARY_END_MARKER
 
         if not _merge_summary_into_tail:
-            compressed.append({
-                "role": summary_role,
-                "content": summary,
-                COMPRESSED_SUMMARY_METADATA_KEY: True,
-            })
+            # Insert verbatim-preserved turns (small user turns + prior
+            # summaries) BEFORE the LLM summary.  This ensures user
+            # intent is never lost to summarisation drift.
+            # After verbatim turns, re-check role alternation for the
+            # summary message — the last verbatim turn's role may differ
+            # from last_head_role.
+            for vmsg in verbatim_turns:
+                compressed.append(vmsg.copy())
+            # Determine actual last role after verbatim insertion
+            actual_last_role = compressed[-1].get("role", "user") if compressed else "user"
+            actual_first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
+            # Re-choose summary role accounting for verbatim turns
+            if actual_last_role == summary_role:
+                flipped = "assistant" if summary_role == "user" else "user"
+                if flipped != actual_first_tail_role:
+                    summary_role = flipped
+                else:
+                    # Merge summary into the last verbatim message
+                    last_vmsg = compressed[-1]
+                    last_vmsg["content"] = _append_text_to_content(
+                        last_vmsg.get("content"),
+                        "\n\n" + summary,
+                    )
+                    last_vmsg[COMPRESSED_SUMMARY_METADATA_KEY] = True
+                    summary_role = None  # skip standalone append
+            if summary_role is not None:
+                compressed.append({
+                    "role": summary_role,
+                    "content": summary,
+                    COMPRESSED_SUMMARY_METADATA_KEY: True,
+                })
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()

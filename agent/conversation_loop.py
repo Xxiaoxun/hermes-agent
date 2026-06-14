@@ -57,7 +57,8 @@ from agent.model_metadata import (
 )
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.retry_utils import adaptive_rate_limit_backoff, jittered_backoff
+from agent.turn_composer import TurnComposer, apply_tail_messages
+from agent.retry_utils import jittered_backoff
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
@@ -602,6 +603,19 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
+    # ── Cold-start optimization ─────────────────────────────────
+    # When resuming a session that's been idle past the provider's
+    # cache TTL, the cache is already cold.  Prune stale tool results
+    # to shrink the expensive first request — since the cache is cold,
+    # rewriting costs nothing extra.
+    # Design reference: DeepSeek-Reasonix controller.go maybeColdResumePrune()
+    _COLD_CACHE_THRESHOLD_SECONDS = 300  # 5 minutes (matches default cache_ttl)
+    if hasattr(agent, '_cold_start_prune') and callable(agent._cold_start_prune):
+        try:
+            agent._cold_start_prune(messages, _COLD_CACHE_THRESHOLD_SECONDS)
+        except Exception:
+            pass  # Prune failure must never block the conversation
+
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
@@ -796,26 +810,29 @@ def run_conversation(
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
 
-        # Build the final system message: cached prompt + ephemeral system prompt.
-        # Ephemeral additions are API-call-time only (not persisted to session DB).
-        # External recall context is injected into the user message, not the system
-        # prompt, so the stable cache prefix remains unchanged.
+        # ── System message (byte-stable, never includes ephemeral data) ──
         #
-        # NOTE: Plugin context from pre_llm_call hooks is injected into the
-        # user message (see injection block above), NOT the system prompt.
-        # This is intentional — system prompt modifications break the prompt
-        # cache prefix.  The system prompt is reserved for Hermes internals.
-        #
-        # Hermes invariant: the system prompt is built ONCE per session
-        # (cached on ``_cached_system_prompt``) and replayed verbatim on
-        # every turn.  We send it as a single content string so the
-        # bytes are byte-stable across turns and upstream prompt caches
-        # stay warm.
-        effective_system = active_system_prompt or ""
-        if agent.ephemeral_system_prompt:
-            effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
-        if effective_system:
-            api_messages = [{"role": "system", "content": effective_system}] + api_messages
+        # The system prompt is built ONCE per session and cached on
+        # ``_cached_system_prompt``.  Ephemeral additions (channel prompts,
+        # memory updates, etc.) are injected via TurnComposer into the
+        # conversation tail — NOT the system message — so the system
+        # prefix stays byte-stable for maximum cache hit rate.
+        if active_system_prompt:
+            api_messages = [{"role": "system", "content": active_system_prompt}] + api_messages
+
+        # ── Turn Composer tail injection ──────────────────────────
+        # Compose ephemeral per-turn data (ephemeral_system_prompt,
+        # memory prefetch, plugin context, background notifications)
+        # into the conversation tail as a separate message.  This
+        # replaces the old pattern of mutating the system message or
+        # the last user message.
+        _tc = getattr(agent, "_turn_composer", None)
+        if _tc is not None and _tc.has_pending():
+            tail = _tc.build_tail_messages(
+                existing_messages=api_messages,
+            )
+            api_messages = apply_tail_messages(api_messages, tail)
+            _tc.drain()
 
         if moa_config:
             try:
@@ -846,17 +863,22 @@ def run_conversation(
             for idx, pfm in enumerate(agent.prefill_messages):
                 api_messages.insert(sys_offset + idx, pfm.copy())
 
-        # Apply Anthropic prompt caching for Claude models on native
-        # Anthropic, OpenRouter, and third-party Anthropic-compatible
-        # gateways. Auto-detected: if ``_use_prompt_caching`` is set,
-        # inject cache_control breakpoints (system + last 3 messages)
-        # to reduce input token costs by ~75% on multi-turn
-        # conversations.
+        # Apply Anthropic prompt caching.  Two strategies available:
+        # * "system_and_3" (legacy) — 4 breakpoints: system + last 3 msgs
+        # * "prefix_match" (recommended) — 2 breakpoints: system (1h) +
+        #   last stable message (5m)  —  designed for ~99% hit rate on
+        #   append-only histories with byte-stable system prompt.
         if agent._use_prompt_caching:
+            _cache_strategy = getattr(agent, "_cache_strategy", "system_and_3")
+            _system_ttl = getattr(agent, "_cache_system_ttl", "1h")
+            _conv_ttl = getattr(agent, "_cache_conversation_ttl", "5m")
             api_messages = apply_anthropic_cache_control(
                 api_messages,
                 cache_ttl=agent._cache_ttl,
                 native_anthropic=agent._use_native_cache_layout,
+                strategy=_cache_strategy,
+                system_ttl=_system_ttl,
+                conversation_ttl=_conv_ttl,
             )
 
         # Safety net: strip orphaned tool results / add stubs for missing
@@ -2132,6 +2154,13 @@ def run_conversation(
                             _sanitized_ephemeral = _strip_non_ascii(agent.ephemeral_system_prompt)
                             if _sanitized_ephemeral != agent.ephemeral_system_prompt:
                                 agent.ephemeral_system_prompt = _sanitized_ephemeral
+                                # Also update TurnComposer so the sanitized
+                                # value is injected into the tail
+                                _tc = getattr(agent, "_turn_composer", None)
+                                if _tc is not None:
+                                    _tc._pending_ephemeral_system = [
+                                        _sanitized_ephemeral
+                                    ]
                                 _system_sanitized = True
 
                         _headers_sanitized = False

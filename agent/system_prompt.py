@@ -496,12 +496,24 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
 def invalidate_system_prompt(agent: Any) -> None:
     """Invalidate the cached system prompt, forcing a rebuild on the next turn.
 
-    Called after context compression events. Also reloads memory from disk
-    so the rebuilt prompt captures any writes from this session.
+    Called after context compression events.  With the cache-first
+    architecture the volatile tier is frozen at session start — memory
+    writes during the session are injected via TurnComposer into the
+    conversation tail, NOT into the system prompt.  Therefore we do
+    NOT reload memory from disk here: that would change the rebuilt
+    prompt's bytes and break the prefix cache at the compression
+    boundary.
+
+    The memory snapshot loaded during ``build_system_prompt_parts``
+    (via ``agent._memory_store``) is preserved across compactions.
     """
     agent._cached_system_prompt = None
-    if agent._memory_store:
-        agent._memory_store.load_from_disk()
+    # NOTE: We intentionally do NOT call agent._memory_store.load_from_disk()
+    # here.  With the cache-first architecture, the system prompt must be
+    # byte-identical after compaction.  Memory changes made during the session
+    # are delivered via TurnComposer.queue_memory() and injected into the
+    # conversation tail — they take effect this turn without busting the
+    # cached prefix.
 
 
 def format_tools_for_system_message(agent: Any) -> str:

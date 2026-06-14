@@ -1353,9 +1353,18 @@ DEFAULT_CONFIG = {
     },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
-    # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
+    # Prompt caching strategy for Anthropic-compatible providers.
+    # strategy: "system_and_3" (legacy, 4 breakpoints) or "prefix_match"
+    #   (recommended, 2 breakpoints — ~99% cache hit rate on append-only
+    #   histories with byte-stable system prompt).
+    # cache_ttl: default TTL for system_and_3 strategy ("5m" or "1h").
+    # system_ttl: TTL for the system-message breakpoint in prefix_match mode.
+    # conversation_ttl: TTL for the conversation breakpoint in prefix_match mode.
     "prompt_caching": {
         "cache_ttl": "5m",
+        "strategy": "prefix_match",
+        "system_ttl": "1h",
+        "conversation_ttl": "5m",
     },
 
     # OpenRouter-specific settings.
