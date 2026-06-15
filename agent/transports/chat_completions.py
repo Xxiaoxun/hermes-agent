@@ -737,3 +737,7 @@ class ChatCompletionsTransport(ProviderTransport):
         return None
 
 
+
+# Auto-register this transport for the "chat_completions" api_mode.
+from agent.transports import register_transport  # noqa: E402
+register_transport("chat_completions", ChatCompletionsTransport)
