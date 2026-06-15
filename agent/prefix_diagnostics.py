@@ -50,22 +50,6 @@ def normalize_tool_schemas(schemas: List[Dict]) -> List[Dict]:
 
 
 
-    Ensures MCP server reconnect order doesn't break the cache prefix.
-    Reference: DeepSeek-Reasonix normalizeToolSchemas() sorts by
-    (Name, Description, Parameters) lexicographic order.
-    """
-    return sorted(
-        schemas,
-        key=lambda s: (
-            s.get("function", {}).get("name", ""),
-            s.get("function", {}).get("description", ""),
-            json.dumps(
-                s.get("function", {}).get("parameters", {}),
-                sort_keys=True
-            ),
-        ),
-    )
-
 
 def capture_shape(system_prompt: str, tool_schemas: List[Dict]) -> PrefixShape:
     """Snapshot the current cacheable prefix state.
