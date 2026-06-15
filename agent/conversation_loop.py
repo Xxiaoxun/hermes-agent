@@ -1894,10 +1894,18 @@ def run_conversation(
                     prompt = usage_dict["prompt_tokens"]
                     if (cached or written) and not agent.quiet_mode:
                         hit_pct = (cached / prompt * 100) if prompt > 0 else 0
+                        cum_hit = getattr(agent, '_session_cache_hit_cumulative', 0)
+                        cum_miss = getattr(agent, '_session_cache_miss_cumulative', 0)
+                        cum_total = cum_hit + cum_miss
+                        cum_pct = (cum_hit / cum_total * 100) if cum_total > 0 else 0
+                        suffix = ""
+                        if cum_total > prompt:
+                            # Session has been compacted — show lifetime stats
+                            suffix = f" | lifetime: {cum_hit:,}/{cum_total:,} ({cum_pct:.0f}%)"
                         agent._vprint(
                             f"{agent.log_prefix}   💾 Cache: "
                             f"{cached:,}/{prompt:,} tokens "
-                            f"({hit_pct:.0f}% hit, {written:,} written)"
+                            f"({hit_pct:.0f}% hit, {written:,} written){suffix}"
                         )
                 
                 _retry.has_retried_429 = False  # Reset on success

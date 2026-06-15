@@ -718,22 +718,48 @@ class ChatCompletionsTransport(ProviderTransport):
         return True
 
     def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
-        """Extract cache stats from OpenAI, DeepSeek, or MiMo usage."""
+        """Extract cache stats from OpenAI, DeepSeek, or MiMo usage.
+
+        Returns dict with 'cached_tokens' and 'creation_tokens', matching
+        the ProviderTransport base-class contract.
+
+        * OpenAI/Anthropic: ``prompt_tokens_details.cached_tokens`` +
+          ``cache_creation_tokens`` (cache write = prefill to server cache)
+        * DeepSeek/MiMo:   ``prompt_cache_hit_tokens`` (cheap reads);
+          ``prompt_cache_miss_tokens`` is NOT cache write — it's regular
+          input at full price (DeepSeek auto-caches, no explicit write).
+        """
         usage = getattr(response, "usage", None)
         if usage is None:
             return None
         cached = 0
-        miss = 0
-        # Path 1: OpenAI-style nested prompt_tokens_details
+        written = 0
+        # Path 1: OpenAI/Anthropic-style nested prompt_tokens_details
         details = getattr(usage, "prompt_tokens_details", None)
         if details:
             cached = getattr(details, "cached_tokens", 0) or 0
-        # Path 2: DeepSeek/MiMo-style top-level fields
+            # Anthropic uses cache_creation_tokens / cache_read_input_tokens
+            written = (
+                getattr(details, "cache_creation_tokens", 0)
+                or getattr(details, "cache_write_tokens", 0)
+                or 0
+            )
+        # Path 2: OpenAI top-level (Responses API)
+        if not cached:
+            cached = (
+                getattr(usage, "cache_read_input_tokens", 0) or 0
+            )
+        if not written:
+            written = (
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+        # Path 3: DeepSeek/MiMo-style top-level fields
         if not cached:
             cached = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
-        miss = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
-        if cached or miss:
-            return {"cached_tokens": cached, "miss_tokens": miss}
+        # NOTE: prompt_cache_miss_tokens is regular input, NOT cache write.
+        # Don't map it to creation_tokens — DeepSeek auto-caches for free.
+        if cached or written:
+            return {"cached_tokens": cached, "creation_tokens": written}
         return None
 
 

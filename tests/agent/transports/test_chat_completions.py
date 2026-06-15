@@ -984,6 +984,27 @@ class TestChatCompletionsCacheStats:
         result = transport.extract_cache_stats(r)
         assert result == {"cached_tokens": 500, "creation_tokens": 100}
 
+    def test_deepseek_cache(self, transport):
+        """DeepSeek uses prompt_cache_hit_tokens (auto-cache, no write cost)."""
+        usage = SimpleNamespace(
+            prompt_tokens_details=None,
+            prompt_cache_hit_tokens=800,
+            prompt_cache_miss_tokens=200,
+        )
+        r = SimpleNamespace(usage=usage)
+        result = transport.extract_cache_stats(r)
+        assert result == {"cached_tokens": 800, "creation_tokens": 0}
+
+    def test_anthropic_cache_creation(self, transport):
+        """Anthropic uses cache_creation_tokens in details."""
+        details = SimpleNamespace(
+            cached_tokens=600,
+            cache_creation_tokens=150,
+        )
+        r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens_details=details))
+        result = transport.extract_cache_stats(r)
+        assert result == {"cached_tokens": 600, "creation_tokens": 150}
+
 
 class TestChatCompletionsGeminiNativeExtraBodyStrip:
     """Profile extra_body (e.g. Nous portal tags) must not reach a native

@@ -97,29 +97,32 @@ def compute_system_hash(system_prompt: str) -> str:
 def compute_tools_hash(tools: List[Dict[str, Any]]) -> str:
     """SHA-256 fingerprint of normalised tool schemas.
 
-    Normalisation:
-    * Sort tool list by ``name``.
-    * Sort ``required`` arrays in ``parameters``.
-    * Deterministic JSON serialisation (sort_keys, no extra whitespace).
+    Uses the same ``canonicalize_tool_schemas`` function as the API request
+    path so the diagnostic hash exactly matches the bytes sent to the
+    provider.  Falls back to a simpler sort+required-normalise if the
+    canonicalizer is unavailable.
     """
     if not tools:
         return ""
 
-    normalised = []
-    for t in sorted(tools, key=lambda x: x.get("name", x.get("function", {}).get("name", ""))):
-        entry = dict(t)
-        # Normalise function.parameters.required if present
-        func = entry.get("function")
-        if isinstance(func, dict):
-            params = func.get("parameters")
-            if isinstance(params, dict):
-                params = dict(params)
-                req = params.get("required")
-                if isinstance(req, list):
-                    params["required"] = sorted(req)
-                func = {**func, "parameters": params}
-                entry = {**entry, "function": func}
-        normalised.append(entry)
+    try:
+        from tools.schema_utils import canonicalize_tool_schemas
+        normalised = canonicalize_tool_schemas(tools)
+    except ImportError:
+        normalised = []
+        for t in sorted(tools, key=lambda x: x.get("name", x.get("function", {}).get("name", ""))):
+            entry = dict(t)
+            func = entry.get("function")
+            if isinstance(func, dict):
+                params = func.get("parameters")
+                if isinstance(params, dict):
+                    params = dict(params)
+                    req = params.get("required")
+                    if isinstance(req, list):
+                        params["required"] = sorted(req)
+                    func = {**func, "parameters": params}
+                    entry = {**entry, "function": func}
+            normalised.append(entry)
 
     serialised = json.dumps(normalised, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return _sha256_short(serialised)

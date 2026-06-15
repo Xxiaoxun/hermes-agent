@@ -560,18 +560,27 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     # Prevents MCP server reconnect order from breaking DeepSeek/MiMo
     # server-side prefix cache. Reference: DeepSeek-Reasonix
     # normalizeToolSchemas() + schema_canonicalize.go
+    #
+    # Cache: tools rarely change between calls. If agent.tools is the same
+    # list object (same id), reuse the previous canonical result.
     if tools_for_api and isinstance(tools_for_api, list):
-        try:
-            from tools.schema_utils import canonicalize_tool_schemas
-            tools_for_api = canonicalize_tool_schemas(tools_for_api)
-        except ImportError:
-            tools_for_api = sorted(
-                tools_for_api,
-                key=lambda t: (
-                    (t.get("function", {}) or {}).get("name", ""),
-                    (t.get("function", {}) or {}).get("description", ""),
-                ),
-            )
+        _cached = getattr(agent, '_canonical_tools_cache', None)
+        if _cached is not None and _cached[0] is tools_for_api:
+            tools_for_api = _cached[1]
+        else:
+            try:
+                from tools.schema_utils import canonicalize_tool_schemas
+                canonical = canonicalize_tool_schemas(tools_for_api)
+            except ImportError:
+                canonical = sorted(
+                    tools_for_api,
+                    key=lambda t: (
+                        (t.get("function", {}) or {}).get("name", ""),
+                        (t.get("function", {}) or {}).get("description", ""),
+                    ),
+                )
+            agent._canonical_tools_cache = (tools_for_api, canonical)
+            tools_for_api = canonical
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
