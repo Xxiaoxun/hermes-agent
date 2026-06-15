@@ -30,7 +30,25 @@ def short_hash(obj: Any) -> str:
 
 
 def normalize_tool_schemas(schemas: List[Dict]) -> List[Dict]:
-    """Sort tool schemas by name for deterministic ordering.
+    """Normalize and sort tool schemas for deterministic prefix matching.
+
+    Uses canonicalize_tool_schemas for recursive property normalization,
+    matching the same function used in the API path.
+    """
+    try:
+        from tools.schema_utils import canonicalize_tool_schemas
+        return canonicalize_tool_schemas(schemas)
+    except ImportError:
+        return sorted(
+            schemas,
+            key=lambda s: (
+                s.get("function", {}).get("name", ""),
+                s.get("function", {}).get("description", ""),
+                json.dumps(s.get("function", {}).get("parameters", {}), sort_keys=True),
+            ),
+        )
+
+
 
     Ensures MCP server reconnect order doesn't break the cache prefix.
     Reference: DeepSeek-Reasonix normalizeToolSchemas() sorts by
