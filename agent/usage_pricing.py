@@ -378,16 +378,18 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://platform.claude.com/docs/en/about-claude/pricing",
         pricing_version="anthropic-pricing-2026-05",
     ),
-    # DeepSeek
+    # DeepSeek — V3 aliases (now mapped server-side to deepseek-v4-flash)
+    # Cache hit price from official pricing page
     (
         "deepseek",
         "deepseek-chat",
     ): PricingEntry(
         input_cost_per_million=Decimal("0.14"),
         output_cost_per_million=Decimal("0.28"),
+        cache_read_cost_per_million=Decimal("0.0028"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-03-16",
+        pricing_version="deepseek-pricing-2026-05-12",
     ),
     (
         "deepseek",
@@ -395,9 +397,21 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     ): PricingEntry(
         input_cost_per_million=Decimal("0.55"),
         output_cost_per_million=Decimal("2.19"),
+        cache_read_cost_per_million=Decimal("0.14"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-03-16",
+        pricing_version="deepseek-pricing-2026-05-12",
+    ),
+    (
+        "deepseek",
+        "deepseek-v4-flash",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.14"),
+        output_cost_per_million=Decimal("0.28"),
+        cache_read_cost_per_million=Decimal("0.0028"),
+        source="official_docs_snapshot",
+        source_url="https://api-docs.deepseek.com/quick_start/pricing",
+        pricing_version="deepseek-pricing-2026-05-12",
     ),
     (
         "deepseek",
@@ -409,6 +423,30 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
         pricing_version="deepseek-pricing-2026-05-12",
+    ),
+    # Xiaomi MiMo — V2.5 series
+    # https://platform.xiaomimimo.com/docs/en-US/pricing
+    (
+        "xiaomi",
+        "mimo-v2.5-pro",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.435"),
+        output_cost_per_million=Decimal("0.87"),
+        cache_read_cost_per_million=Decimal("0.0036"),
+        source="official_docs_snapshot",
+        source_url="https://platform.xiaomimimo.com/docs/en-US/pricing",
+        pricing_version="mimo-pricing-2026-05-27",
+    ),
+    (
+        "xiaomi",
+        "mimo-v2.5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.14"),
+        output_cost_per_million=Decimal("0.28"),
+        cache_read_cost_per_million=Decimal("0.0028"),
+        source="official_docs_snapshot",
+        source_url="https://platform.xiaomimimo.com/docs/en-US/pricing",
+        pricing_version="mimo-pricing-2026-05-27",
     ),
     # Google Gemini
     (
@@ -756,6 +794,15 @@ def normalize_usage(
         if not cache_write_tokens:
             cache_write_tokens = _to_int(
                 getattr(response_usage, "cache_creation_input_tokens", 0)
+            )
+        # DeepSeek / Xiaomi MiMo style: prompt_cache_hit_tokens
+        # NOTE: prompt_cache_miss_tokens is non-cached input (same price as
+        # regular input), NOT "cache write". Don't map it to cache_write_tokens.
+        # With cache_read_tokens set, input_tokens = prompt_total - cache_read
+        # naturally gives us the non-cached portion.
+        if not cache_read_tokens:
+            cache_read_tokens = _to_int(
+                getattr(response_usage, "prompt_cache_hit_tokens", 0)
             )
         input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
 
