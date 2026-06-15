@@ -718,28 +718,22 @@ class ChatCompletionsTransport(ProviderTransport):
         return True
 
     def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
-        """Extract cache stats from OpenRouter/OpenAI or DeepSeek/MiMo usage."""
+        """Extract cache stats from OpenAI, DeepSeek, or MiMo usage."""
         usage = getattr(response, "usage", None)
         if usage is None:
             return None
-        # Primary: OpenAI-style prompt_tokens_details
+        cached = 0
+        miss = 0
+        # Path 1: OpenAI-style nested prompt_tokens_details
         details = getattr(usage, "prompt_tokens_details", None)
-        cached = getattr(details, "cached_tokens", 0) if details else 0
-        written = getattr(details, "cache_write_tokens", 0) if details else 0
-        cached = cached or 0
-        written = written or 0
-        # Fallback: DeepSeek / Xiaomi MiMo style top-level field
-        # prompt_cache_hit_tokens = tokens read from cache (cheap)
-        # NOTE: prompt_cache_miss_tokens is NOT "cache write" — it's non-cached
-        # input, so we don't map it to creation_tokens.
+        if details:
+            cached = getattr(details, "cached_tokens", 0) or 0
+        # Path 2: DeepSeek/MiMo-style top-level fields
         if not cached:
             cached = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
-        if cached or written:
-            return {"cached_tokens": cached, "creation_tokens": written}
+        miss = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
+        if cached or miss:
+            return {"cached_tokens": cached, "miss_tokens": miss}
         return None
 
 
-# Auto-register on import
-from agent.transports import register_transport  # noqa: E402
-
-register_transport("chat_completions", ChatCompletionsTransport)

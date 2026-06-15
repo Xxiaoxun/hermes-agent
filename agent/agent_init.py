@@ -1673,6 +1673,10 @@ def init_agent(
     agent.session_output_tokens = 0
     agent.session_cache_read_tokens = 0
     agent.session_cache_write_tokens = 0
+    # Cumulative cache stats that survive session rotation (compaction).
+    # Reference: DeepSeek-Reasonix agent.go sessCacheHit/sessCacheMiss atomic counters
+    agent._session_cache_hit_cumulative = 0
+    agent._session_cache_miss_cumulative = 0
     agent.session_reasoning_tokens = 0
     agent.session_estimated_cost_usd = 0.0
     agent.session_cost_status = "unknown"

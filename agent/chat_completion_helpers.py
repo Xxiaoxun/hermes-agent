@@ -555,6 +555,18 @@ def interruptible_api_call(agent, api_kwargs: dict):
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
+    # Sort tool schemas by name for deterministic prefix matching.
+    # Prevents MCP server reconnect order from breaking DeepSeek/MiMo
+    # server-side prefix cache. Reference: DeepSeek-Reasonix
+    # normalizeToolSchemas() sorts by (Name, Description, Parameters).
+    if tools_for_api and isinstance(tools_for_api, list):
+        tools_for_api = sorted(
+            tools_for_api,
+            key=lambda t: (
+                (t.get("function", {}) or {}).get("name", ""),
+                (t.get("function", {}) or {}).get("description", ""),
+            ),
+        )
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()

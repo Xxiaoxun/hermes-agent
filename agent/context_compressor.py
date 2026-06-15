@@ -2218,6 +2218,19 @@ This compaction should PRIORITISE preserving all information related to the focu
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
 
+        # Phase 1b: Short-circuit — if pruning alone brought us below
+        # the compression threshold, skip the expensive LLM-based
+        # compression to preserve the cache prefix.
+        # Reference: DeepSeek-Reasonix compact.go lines 410-413
+        if pruned_count > 0 and not force:
+            post_prune_tokens = estimate_messages_tokens_rough(messages)
+            if post_prune_tokens < self.threshold_tokens:
+                logger.info(
+                    "Stale tool pruning sufficient (pruned %d, tokens %d < threshold %d); "                     "skipping full compression to preserve cache prefix",
+                    pruned_count, post_prune_tokens, self.threshold_tokens,
+                )
+                return messages
+
         # Phase 2: Determine boundaries
         compress_start = self._protect_head_size(messages)
         compress_start = self._align_boundary_forward(messages, compress_start)

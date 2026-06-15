@@ -1803,6 +1803,10 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                    # Cumulative cache stats (survive session rotation)
+                    agent._session_cache_hit_cumulative = getattr(agent, '_session_cache_hit_cumulative', 0) + canonical_usage.cache_read_tokens
+                    _miss = max(0, (canonical_usage.prompt_tokens or 0) - (canonical_usage.cache_read_tokens or 0))
+                    agent._session_cache_miss_cumulative = getattr(agent, '_session_cache_miss_cumulative', 0) + _miss
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
